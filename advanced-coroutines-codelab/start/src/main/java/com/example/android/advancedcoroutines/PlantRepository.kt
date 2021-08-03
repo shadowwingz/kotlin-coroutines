@@ -16,6 +16,11 @@
 
 package com.example.android.advancedcoroutines
 
+import androidx.lifecycle.LiveData
+import androidx.lifecycle.liveData
+import androidx.lifecycle.map
+import com.example.android.advancedcoroutines.util.CacheOnSuccess
+import com.example.android.advancedcoroutines.utils.ComparablePair
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 
@@ -33,19 +38,54 @@ class PlantRepository private constructor(
     private val plantService: NetworkService,
     private val defaultDispatcher: CoroutineDispatcher = Dispatchers.Default
 ) {
-
+    
+    /**
+     * 内存缓存
+     *
+     * 这段代码的意思是，执行 plantService.customPlantSortOrder() 网络请求操作，如果出现网络连接错误，就显示空列表
+     */
+    private var plantsListSortOrderCache =
+        CacheOnSuccess(onErrorFallback = {
+            listOf()
+        }, {
+            plantService.customPlantSortOrder()
+        })
+    
+    private fun List<Plant>.applySort(customSortOrder: List<String>): List<Plant> {
+        return sortedBy { plant ->
+            val positionForItem = customSortOrder.indexOf(plant.plantId).let { order ->
+                if (order > -1) order else Int.MAX_VALUE
+            }
+            ComparablePair(positionForItem, plant.name)
+        }
+    }
+    
     /**
      * Fetch a list of [Plant]s from the database.
      * Returns a LiveData-wrapped List of Plants.
      */
-    val plants = plantDao.getPlants()
-
+//    val plants = plantDao.getPlants()
+    val plants: LiveData<List<Plant>> = liveData {
+        val plantsLiveData = plantDao.getPlants()
+        val customSortOrder = plantsListSortOrderCache.getOrAwait()
+        emitSource(plantsLiveData.map { plantList ->
+            plantList.applySort(customSortOrder)
+        })
+    }
+    
     /**
      * Fetch a list of [Plant]s from the database that matches a given [GrowZone].
      * Returns a LiveData-wrapped List of Plants.
      */
-    fun getPlantsWithGrowZone(growZone: GrowZone) =
-        plantDao.getPlantsWithGrowZoneNumber(growZone.number)
+//    fun getPlantsWithGrowZone(growZone: GrowZone) =
+//        plantDao.getPlantsWithGrowZoneNumber(growZone.number)
+    fun getPlantsWithGrowZone(growZone: GrowZone) = liveData {
+        val plantsGrowZoneLiveData = plantDao.getPlantsWithGrowZoneNumber(growZone.number)
+        val customSortOrder = plantsListSortOrderCache.getOrAwait()
+        emitSource(plantsGrowZoneLiveData.map { plantList ->
+            plantList.applySort(customSortOrder)
+        })
+    }
 
     /**
      * Returns true if we should make a network request.
@@ -54,7 +94,7 @@ class PlantRepository private constructor(
         // suspending function, so you can e.g. check the status of the database here
         return true
     }
-
+    
     /**
      * Update the plants cache.
      *
@@ -64,7 +104,7 @@ class PlantRepository private constructor(
     suspend fun tryUpdateRecentPlantsCache() {
         if (shouldUpdatePlantsCache()) fetchRecentPlants()
     }
-
+    
     /**
      * Update the plants cache for a specific grow zone.
      *
@@ -74,7 +114,7 @@ class PlantRepository private constructor(
     suspend fun tryUpdateRecentPlantsForGrowZoneCache(growZoneNumber: GrowZone) {
         if (shouldUpdatePlantsCache()) fetchPlantsForGrowZone(growZoneNumber)
     }
-
+    
     /**
      * Fetch a new list of plants from the network, and append them to [plantDao]
      */
@@ -82,7 +122,7 @@ class PlantRepository private constructor(
         val plants = plantService.allPlants()
         plantDao.insertAll(plants)
     }
-
+    
     /**
      * Fetch a list of plants for a grow zone from the network, and append them to [plantDao]
      */
@@ -90,12 +130,13 @@ class PlantRepository private constructor(
         val plants = plantService.plantsByGrowZone(growZone)
         plantDao.insertAll(plants)
     }
-
+    
     companion object {
-
+        
         // For Singleton instantiation
-        @Volatile private var instance: PlantRepository? = null
-
+        @Volatile
+        private var instance: PlantRepository? = null
+        
         fun getInstance(plantDao: PlantDao, plantService: NetworkService) =
             instance ?: synchronized(this) {
                 instance ?: PlantRepository(plantDao, plantService).also { instance = it }
